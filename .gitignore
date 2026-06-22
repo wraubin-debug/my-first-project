@@ -5,6 +5,9 @@ flagged_emails_cache.json
 # Queued unflag requests (Outlook entry IDs) awaiting the nightly write-back.
 pending_unflags.json
 
+# Daily Claude-generated assistant briefing — built from your tasks/emails.
+assistant_briefing_cache.json
+
 # Python bytecode
 __pycache__/
 *.pyc

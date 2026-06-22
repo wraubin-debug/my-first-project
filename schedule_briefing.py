@@ -76,6 +76,33 @@ def register_email_cache_task(pythonw_path, reader_script):
         print(f"  {result.stderr.strip()}")
 
 
+def register_assistant_briefing_task(pythonw_path, assistant_script):
+    # Generate the Claude-powered daily briefing at 7:05 AM — just after the
+    # 7:00 AM flagged-email fetch, so the briefing sees a fresh flagged cache.
+    task_name = "Personal Assistant Briefing"
+    command = f'"{pythonw_path}" "{assistant_script}" --refresh'
+
+    print("Registering daily assistant briefing (7:05 AM)...")
+
+    result = subprocess.run(
+        [
+            "schtasks", "/create",
+            "/tn", task_name,
+            "/tr", command,
+            "/sc", "daily",
+            "/st", "07:05",
+            "/f",            # overwrite if it already exists
+        ],
+        capture_output=True, text=True,
+    )
+
+    if result.returncode == 0:
+        print(f"  '{task_name}' registered — builds your briefing daily at 7:05 AM.")
+    else:
+        print("  ERROR: Could not register assistant briefing task.")
+        print(f"  {result.stderr.strip()}")
+
+
 def register_apply_unflags_task(pythonw_path, reader_script):
     # Write any unflags you made in the app back to Outlook in one nightly
     # batch at 10 PM, so Outlook isn't poked while you're using it.
@@ -145,11 +172,13 @@ def main():
     briefing_script     = os.path.join(script_dir, "morning_briefing.py")
     task_manager_script = os.path.join(script_dir, "task_manager.py")
     reader_script       = os.path.join(script_dir, "get_flagged_emails.py")
+    assistant_script    = os.path.join(script_dir, "personal_assistant.py")
 
     for path, name in [
         (briefing_script,     "morning_briefing.py"),
         (task_manager_script, "task_manager.py"),
         (reader_script,       "get_flagged_emails.py"),
+        (assistant_script,    "personal_assistant.py"),
     ]:
         if not os.path.exists(path):
             print(f"Error: {name} not found at {path}")
@@ -167,6 +196,7 @@ def main():
 
     register_scheduled_task(pythonw_path, briefing_script)
     register_email_cache_task(pythonw_path, reader_script)
+    register_assistant_briefing_task(pythonw_path, assistant_script)
     register_apply_unflags_task(pythonw_path, reader_script)
     create_desktop_shortcut(pythonw_path, task_manager_script, script_dir, desktop)
 
@@ -174,6 +204,7 @@ def main():
     print("All done!")
     print("  Morning Briefing: launches automatically every day at 9:00 AM")
     print("  Email fetch:      reads flagged emails from Outlook daily at 7:00 AM")
+    print("  Assistant brief:  Claude builds your daily plan at 7:05 AM")
     print("  Apply unflags:    writes your unflags back to Outlook daily at 10:00 PM")
     print("  Task Manager:     shortcut on your Desktop")
     print()
