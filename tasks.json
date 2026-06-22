@@ -12,13 +12,6 @@
     "project": "General"
   },
   {
-    "title": "Buy milk",
-    "done": true,
-    "priority": "High",
-    "id": 3,
-    "project": "General"
-  },
-  {
     "id": 4,
     "title": "Build Agent",
     "priority": "High",
