@@ -1,15 +1,35 @@
 [
   {
     "title": "Learn Claude Code",
-    "done": true
+    "done": true,
+    "id": 1,
+    "project": "General"
   },
   {
     "title": "Practice what I have learned",
-    "done": false
+    "done": false,
+    "id": 2,
+    "project": "General"
   },
   {
     "title": "Buy milk",
+    "done": true,
+    "priority": "High",
+    "id": 3,
+    "project": "General"
+  },
+  {
+    "id": 4,
+    "title": "Build Agent",
+    "priority": "High",
     "done": false,
-    "priority": "High"
+    "project": "General"
+  },
+  {
+    "id": 5,
+    "title": "test",
+    "priority": "High",
+    "done": false,
+    "project": "Mercury"
   }
 ]
