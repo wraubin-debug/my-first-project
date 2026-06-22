@@ -2,6 +2,9 @@
 # Machine-specific and potentially sensitive; never commit.
 flagged_emails_cache.json
 
+# Queued unflag requests (Outlook entry IDs) awaiting the nightly write-back.
+pending_unflags.json
+
 # Python bytecode
 __pycache__/
 *.pyc

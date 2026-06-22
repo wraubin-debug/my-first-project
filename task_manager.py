@@ -16,7 +16,6 @@ except ImportError:
     flagged_email_reader = None
 
 EMAIL_FLAG_COLOR = "#f5a623"
-EMAIL_REFRESH_MS = 5 * 60 * 1000  # re-read flagged emails every 5 minutes
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -97,16 +96,16 @@ class TaskManagerApp(ctk.CTk):
         self.current_project = self.projects[0]
         self._email_queue = queue.Queue()
         self._loading_emails = False
-        self._email_timer = None
         self._email_rows = []
 
         self._build_ui()
         self._refresh_projects()
         self._refresh_task_list()
-        # Show cached emails instantly, then refresh from Outlook in the
-        # background and keep refreshing on a timer.
+        # Show the cached flagged emails instantly. We deliberately do NOT read
+        # Outlook when the window opens — that live read is what made Outlook
+        # sluggish. Use the Refresh button to pull the latest on demand; the
+        # scheduled 7 AM task also keeps the cache current.
         self._show_cached_emails()
-        self.after(300, self._refresh_emails)
 
     def _build_ui(self):
         self.grid_columnconfigure(1, weight=1)
@@ -431,7 +430,7 @@ class TaskManagerApp(ctk.CTk):
             self._populate_emails(emails[:10], None, updated)
         else:
             self._clear_emails()
-            self._show_email_message("Loading flagged emails…")
+            self._show_email_message("No flagged emails cached yet — click Refresh to load.")
 
     def _refresh_emails(self):
         if flagged_email_reader is None:
@@ -440,8 +439,8 @@ class TaskManagerApp(ctk.CTk):
         if self._loading_emails:
             return  # a read is already in progress
         self._loading_emails = True
-        # Refresh from Outlook off the main thread; the current (cached) list
-        # stays on screen until the fresh result arrives.
+        # Manual Refresh: read Outlook off the main thread; the current (cached)
+        # list stays on screen until the fresh result arrives.
         threading.Thread(target=self._load_emails_worker, daemon=True).start()
         self.after(150, self._poll_email_result)
 
@@ -453,7 +452,9 @@ class TaskManagerApp(ctk.CTk):
         except Exception:
             pythoncom = None
         try:
-            emails, error = flagged_email_reader.refresh_cache(limit=50)
+            # force=True so the button always pulls the latest from Outlook,
+            # bypassing the once-a-day throttle in refresh_cache().
+            emails, error = flagged_email_reader.refresh_cache(limit=50, force=True)
         except Exception as worker_error:
             emails, error = [], f"Couldn't read Outlook ({worker_error})"
         finally:
@@ -478,15 +479,6 @@ class TaskManagerApp(ctk.CTk):
             if cached:
                 emails, updated, error = cached, cached_updated, None
         self._populate_emails(emails[:10], error, updated)
-        self._schedule_email_refresh()
-
-    def _schedule_email_refresh(self):
-        if self._email_timer is not None:
-            try:
-                self.after_cancel(self._email_timer)
-            except Exception:
-                pass
-        self._email_timer = self.after(EMAIL_REFRESH_MS, self._refresh_emails)
 
     def _populate_emails(self, emails, error, updated):
         self._clear_emails()
@@ -570,16 +562,16 @@ class TaskManagerApp(ctk.CTk):
     def _unflag_email(self, email, row):
         if flagged_email_reader is None:
             return
-        ok, error = flagged_email_reader.unflag_email(
+        # Queue the unflag instead of writing to Outlook now — it disappears
+        # from the cache/UI immediately, and Outlook is updated by the nightly
+        # 10 PM batch, so Outlook stays responsive while you work.
+        ok, error = flagged_email_reader.queue_unflag(
             email.get("entry_id", ""), email.get("store_id", "")
         )
         if not ok:
             if error:
                 messagebox.showerror("Unflag email", error)
             return
-        # Remove just this email — from the cache and the UI — without a
-        # full Outlook re-read.
-        flagged_email_reader.remove_from_cache(email.get("entry_id", ""))
         if row in self._email_rows:
             self._email_rows.remove(row)
         row.destroy()

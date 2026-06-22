@@ -49,27 +49,57 @@ def register_scheduled_task(pythonw_path, briefing_script):
 
 
 def register_email_cache_task(pythonw_path, reader_script):
+    # Fetch flagged emails from Outlook just once a day, at 7 AM, so Outlook
+    # isn't repeatedly poked during the day. (This overwrites the old
+    # every-15-minutes task of the same name, if it exists.)
     task_name = "Flagged Email Cache Refresh"
     command = f'"{pythonw_path}" "{reader_script}" --refresh'
 
-    print("Registering flagged-email cache refresh task...")
+    print("Registering daily flagged-email fetch (7 AM)...")
 
     result = subprocess.run(
         [
             "schtasks", "/create",
             "/tn", task_name,
             "/tr", command,
-            "/sc", "minute",
-            "/mo", "15",     # every 15 minutes
+            "/sc", "daily",
+            "/st", "07:00",
             "/f",            # overwrite if it already exists
         ],
         capture_output=True, text=True,
     )
 
     if result.returncode == 0:
-        print(f"  '{task_name}' registered — refreshes the cache every 15 minutes.")
+        print(f"  '{task_name}' registered — fetches flagged emails daily at 7:00 AM.")
     else:
-        print("  ERROR: Could not register cache refresh task.")
+        print("  ERROR: Could not register daily fetch task.")
+        print(f"  {result.stderr.strip()}")
+
+
+def register_apply_unflags_task(pythonw_path, reader_script):
+    # Write any unflags you made in the app back to Outlook in one nightly
+    # batch at 10 PM, so Outlook isn't poked while you're using it.
+    task_name = "Apply Unflagged Emails"
+    command = f'"{pythonw_path}" "{reader_script}" --apply-unflags'
+
+    print("Registering nightly apply-unflags task (10 PM)...")
+
+    result = subprocess.run(
+        [
+            "schtasks", "/create",
+            "/tn", task_name,
+            "/tr", command,
+            "/sc", "daily",
+            "/st", "22:00",
+            "/f",            # overwrite if it already exists
+        ],
+        capture_output=True, text=True,
+    )
+
+    if result.returncode == 0:
+        print(f"  '{task_name}' registered — applies queued unflags daily at 10:00 PM.")
+    else:
+        print("  ERROR: Could not register apply-unflags task.")
         print(f"  {result.stderr.strip()}")
 
 
@@ -137,16 +167,21 @@ def main():
 
     register_scheduled_task(pythonw_path, briefing_script)
     register_email_cache_task(pythonw_path, reader_script)
+    register_apply_unflags_task(pythonw_path, reader_script)
     create_desktop_shortcut(pythonw_path, task_manager_script, script_dir, desktop)
 
     print()
     print("All done!")
     print("  Morning Briefing: launches automatically every day at 9:00 AM")
-    print("  Email cache:      refreshes every 15 minutes in the background")
+    print("  Email fetch:      reads flagged emails from Outlook daily at 7:00 AM")
+    print("  Apply unflags:    writes your unflags back to Outlook daily at 10:00 PM")
     print("  Task Manager:     shortcut on your Desktop")
     print()
-    print("To change the time: Task Scheduler > Task Scheduler Library > 'Morning Briefing'")
-    print("To remove the task: schtasks /delete /tn \"Morning Briefing\" /f")
+    print("These run while the screen is locked, as long as you're still logged in")
+    print("and the machine is awake (not asleep/shut down) at those times.")
+    print()
+    print("To change a time: Task Scheduler > Task Scheduler Library > pick the task")
+    print("To remove a task: schtasks /delete /tn \"Morning Briefing\" /f")
 
 
 if __name__ == "__main__":
