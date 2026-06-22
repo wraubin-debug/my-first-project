@@ -1,0 +1,15 @@
+[
+  {
+    "title": "Learn Claude Code",
+    "done": true
+  },
+  {
+    "title": "Practice what I have learned",
+    "done": false
+  },
+  {
+    "title": "Buy milk",
+    "done": false,
+    "priority": "High"
+  }
+]
