@@ -5,9 +5,10 @@ signed into — no cloud credentials, no third-party service.
 
 To keep Outlook responsive, this module is deliberately gentle with it:
 
-  * It reads only Outlook's built-in **To-Do folder** — the search folder
-    Outlook already maintains of every flagged item — instead of walking every
-    folder of every mailbox. That's a single, cheap read.
+  * It reads only the **"For Follow Up" search folder** — a search folder you
+    set up in Outlook that gathers every flagged item, including ones living in
+    subfolders — instead of walking every folder of every mailbox. That's a
+    single, cheap read.
   * The Outlook read happens **once a day** (the scheduled 7 AM fetch).
     refresh_cache() throttles itself: if the cache was already refreshed since
     today's 7 AM mark, it returns the cache and never touches Outlook.
@@ -32,32 +33,37 @@ PENDING_UNFLAGS_FILE = os.path.join(_HERE, "pending_unflags.json")
 # written at or after the most recent 7 AM is considered up to date.
 DAILY_FETCH_HOUR = 7
 
-# Outlook FlagStatus values (per-item): 0 = none, 1 = complete, 2 = flagged
-OL_FLAG_MARKED = 2
-# Restrict to mail items only (avoids tasks, flagged contacts, etc.)
-OL_MAIL_ITEM = "IPM.Note"
-# OlDefaultFolders.olFolderToDo — Outlook's search folder of all flagged items.
-OL_FOLDER_TODO = 28
+# Name of the Outlook search folder we read. Unlike the built-in To-Do folder,
+# this one is set up to also include flagged items that live in subfolders.
+SEARCH_FOLDER_NAME = "For Follow Up"
 
 
-def _read_flagged_from_todo_folder(todo_folder):
-    """Yield mail items the user flagged for follow-up from the To-Do folder.
+def _find_search_folder(namespace, folder_name):
+    """Return the search folder with the given name, or None if it isn't found.
 
-    The To-Do folder already contains only flagged items and tasks, so there's
-    no per-folder search to run. We still confirm each item is a mail message
-    the user actively flagged (not a task, not completed, not a sender/system
-    flag like the daily "To-Dos and News" digest, which has IsMarkedAsTask False).
-    """
-    for item in todo_folder.Items:
+    Search folders aren't reachable through GetDefaultFolder; each mailbox store
+    keeps its own search-folders collection. The folder we want lives in the
+    primary mailbox, which isn't necessarily the DefaultStore (that can be a
+    local .pst), so we look through every store and stop at the first match."""
+    for store in namespace.Stores:
         try:
-            if getattr(item, "MessageClass", "") != OL_MAIL_ITEM:
-                continue
-            if getattr(item, "FlagStatus", 0) != OL_FLAG_MARKED:
-                continue  # skip completed or cleared flags
-            if not getattr(item, "IsMarkedAsTask", False):
-                continue  # skip sender/system flags (newsletters, reminders)
+            search_folders = store.GetSearchFolders()
         except Exception:
-            continue  # an item we can't inspect — skip it
+            continue  # some stores (e.g. an online archive) deny access
+        for folder in search_folders:
+            if folder.Name == folder_name:
+                return folder
+    return None
+
+
+def _read_items_from_folder(folder):
+    """Yield every item in the given folder.
+
+    The "For Follow Up" search folder is one the user curates in Outlook, so we
+    surface everything it contains — flagged mail plus anything else they routed
+    into it, like meeting requests — rather than second-guessing with filters.
+    """
+    for item in folder.Items:
         yield item
 
 
@@ -65,8 +71,8 @@ def get_flagged_emails(limit=50):
     """Return (emails, error). emails is a list of dicts with subject, sender,
     received — newest first. error is None on success, or a short string.
 
-    Reads only Outlook's To-Do folder (all flagged items, newest first). This is
-    a single light read rather than a full-mailbox folder sweep."""
+    Reads only the "For Follow Up" search folder (every item it contains, newest
+    first). This is a single light read rather than a full-mailbox folder sweep."""
     try:
         import win32com.client
     except ImportError:
@@ -79,30 +85,32 @@ def get_flagged_emails(limit=50):
         return [], f"Couldn't connect to Outlook ({error})"
 
     try:
-        todo_folder = namespace.GetDefaultFolder(OL_FOLDER_TODO)
+        follow_up_folder = _find_search_folder(namespace, SEARCH_FOLDER_NAME)
     except Exception as error:
-        return [], f"Couldn't open Outlook's To-Do folder ({error})"
+        return [], f'Couldn\'t open the "{SEARCH_FOLDER_NAME}" folder ({error})'
+    if follow_up_folder is None:
+        return [], f'Couldn\'t find a search folder named "{SEARCH_FOLDER_NAME}" in Outlook'
 
-    # All To-Do items live in the same (primary) mailbox store, so one store id
+    # The search folder belongs to the primary mailbox store, so one store id
     # serves every row for later open/unflag lookups.
     try:
-        store_id = todo_folder.Store.StoreID
+        store_id = follow_up_folder.Store.StoreID
     except Exception:
         store_id = ""
 
     collected = []  # (received_datetime, email_dict)
-    try:
-        for item in _read_flagged_from_todo_folder(todo_folder):
+    for item in _read_items_from_folder(follow_up_folder):
+        try:
             received_dt = getattr(item, "ReceivedTime", None)
             collected.append((received_dt, {
-                "subject": (item.Subject or "(no subject)").strip(),
+                "subject": (getattr(item, "Subject", "") or "(no subject)").strip(),
                 "sender": (getattr(item, "SenderName", "") or "").strip(),
                 "received": received_dt.strftime("%b %d") if received_dt else "",
                 "entry_id": getattr(item, "EntryID", "") or "",
                 "store_id": store_id,
             }))
-    except Exception as error:
-        return [], f"Couldn't read flagged emails ({error})"
+        except Exception:
+            continue  # an item we can't read — skip it, keep the rest
 
     # Newest first; undated items go last.
     dated = sorted(
