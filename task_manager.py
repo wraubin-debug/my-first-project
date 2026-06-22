@@ -2,11 +2,21 @@ import customtkinter as ctk
 from tkinter import messagebox
 import json
 import os
+import queue
+import threading
 
 try:
     import generate_mobile_view
 except ImportError:
     generate_mobile_view = None
+
+try:
+    import get_flagged_emails as flagged_email_reader
+except ImportError:
+    flagged_email_reader = None
+
+EMAIL_FLAG_COLOR = "#f5a623"
+EMAIL_REFRESH_MS = 5 * 60 * 1000  # re-read flagged emails every 5 minutes
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -85,10 +95,18 @@ class TaskManagerApp(ctk.CTk):
         self.tasks = load_tasks()
         self.projects = load_projects(self.tasks)
         self.current_project = self.projects[0]
+        self._email_queue = queue.Queue()
+        self._loading_emails = False
+        self._email_timer = None
+        self._email_rows = []
 
         self._build_ui()
         self._refresh_projects()
         self._refresh_task_list()
+        # Show cached emails instantly, then refresh from Outlook in the
+        # background and keep refreshing on a timer.
+        self._show_cached_emails()
+        self.after(300, self._refresh_emails)
 
     def _build_ui(self):
         self.grid_columnconfigure(1, weight=1)
@@ -181,6 +199,29 @@ class TaskManagerApp(ctk.CTk):
             right, text="", font=ctk.CTkFont(size=12), text_color="gray", anchor="w"
         )
         self.stats_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
+
+        # Flagged emails panel (fixed height, below the task list)
+        email_panel = ctk.CTkFrame(right, corner_radius=8)
+        email_panel.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        email_panel.grid_columnconfigure(0, weight=1)
+
+        email_header = ctk.CTkFrame(email_panel, fg_color="transparent")
+        email_header.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        email_header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            email_header, text="Flagged Emails",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+
+        ctk.CTkButton(
+            email_header, text="Refresh", width=70, height=26,
+            font=ctk.CTkFont(size=12), command=self._refresh_emails,
+        ).grid(row=0, column=1, sticky="e")
+
+        self.email_scroll = ctk.CTkScrollableFrame(email_panel, height=130, fg_color="transparent")
+        self.email_scroll.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 10))
+        self.email_scroll.grid_columnconfigure(0, weight=1)
 
     # ── Project actions ───────────────────────────────────────────────────────
 
@@ -377,6 +418,174 @@ class TaskManagerApp(ctk.CTk):
             row, text=priority, font=ctk.CTkFont(size=11),
             text_color="gray" if is_done else color, width=58, anchor="e",
         ).pack(side="right", padx=(0, 6))
+
+    # ── Flagged emails ────────────────────────────────────────────────────────
+
+    def _show_cached_emails(self):
+        """Display whatever is in the cache file immediately (no Outlook read)."""
+        if flagged_email_reader is None:
+            self._populate_emails([], "Email reader unavailable.", None)
+            return
+        emails, updated = flagged_email_reader.read_cached_emails()
+        if emails or updated:
+            self._populate_emails(emails[:10], None, updated)
+        else:
+            self._clear_emails()
+            self._show_email_message("Loading flagged emails…")
+
+    def _refresh_emails(self):
+        if flagged_email_reader is None:
+            self._populate_emails([], "Email reader unavailable.", None)
+            return
+        if self._loading_emails:
+            return  # a read is already in progress
+        self._loading_emails = True
+        # Refresh from Outlook off the main thread; the current (cached) list
+        # stays on screen until the fresh result arrives.
+        threading.Thread(target=self._load_emails_worker, daemon=True).start()
+        self.after(150, self._poll_email_result)
+
+    def _load_emails_worker(self):
+        pythoncom = None
+        try:
+            import pythoncom  # COM must be initialized in this thread
+            pythoncom.CoInitialize()
+        except Exception:
+            pythoncom = None
+        try:
+            emails, error = flagged_email_reader.refresh_cache(limit=50)
+        except Exception as worker_error:
+            emails, error = [], f"Couldn't read Outlook ({worker_error})"
+        finally:
+            if pythoncom is not None:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+        _, updated = flagged_email_reader.read_cached_emails()
+        self._email_queue.put((emails, error, updated))
+
+    def _poll_email_result(self):
+        try:
+            emails, error, updated = self._email_queue.get_nowait()
+        except queue.Empty:
+            self.after(150, self._poll_email_result)  # not ready yet
+            return
+        self._loading_emails = False
+        # On a transient read error, keep showing the last good cache.
+        if error:
+            cached, cached_updated = flagged_email_reader.read_cached_emails()
+            if cached:
+                emails, updated, error = cached, cached_updated, None
+        self._populate_emails(emails[:10], error, updated)
+        self._schedule_email_refresh()
+
+    def _schedule_email_refresh(self):
+        if self._email_timer is not None:
+            try:
+                self.after_cancel(self._email_timer)
+            except Exception:
+                pass
+        self._email_timer = self.after(EMAIL_REFRESH_MS, self._refresh_emails)
+
+    def _populate_emails(self, emails, error, updated):
+        self._clear_emails()
+        if emails:
+            for email in emails:
+                self._render_email_row(email)
+            if updated:
+                self._show_email_status(f"Updated {updated}")
+        elif error:
+            self._show_email_message(error)
+        else:
+            self._show_email_message("No flagged emails — inbox is clear!")
+
+    def _clear_emails(self):
+        for widget in self.email_scroll.winfo_children():
+            widget.destroy()
+        self._email_rows = []
+
+    def _show_email_message(self, text):
+        ctk.CTkLabel(
+            self.email_scroll, text=text, text_color="gray",
+            font=ctk.CTkFont(size=12), anchor="w", justify="left", wraplength=480,
+        ).pack(anchor="w", pady=6, padx=4)
+
+    def _show_email_status(self, text):
+        ctk.CTkLabel(
+            self.email_scroll, text=text, text_color="#555555",
+            font=ctk.CTkFont(size=10), anchor="w",
+        ).pack(anchor="w", pady=(4, 0), padx=4)
+
+    def _render_email_row(self, email):
+        row = ctk.CTkFrame(self.email_scroll, fg_color="transparent")
+        row.pack(fill="x", pady=2)
+        self._email_rows.append(row)
+
+        envelope = ctk.CTkLabel(
+            row, text="✉", font=ctk.CTkFont(size=13),
+            text_color=EMAIL_FLAG_COLOR, width=22,
+        )
+        envelope.pack(side="left", padx=(4, 0))
+
+        # Unflag button (rightmost)
+        ctk.CTkButton(
+            row, text="Unflag", width=58, height=24, font=ctk.CTkFont(size=11),
+            fg_color="transparent", border_width=1, border_color="#3d3d50",
+            text_color="#9ca3af", hover_color="#7b2d2d",
+            command=lambda em=email, r=row: self._unflag_email(em, r),
+        ).pack(side="right", padx=(6, 4))
+
+        detail = email["sender"]
+        if email["received"]:
+            detail = f"{detail} · {email['received']}" if detail else email["received"]
+        detail_label = None
+        if detail:
+            detail_label = ctk.CTkLabel(
+                row, text=detail, font=ctk.CTkFont(size=11),
+                text_color="#6b7280", anchor="e",
+            )
+            detail_label.pack(side="right", padx=(8, 6))
+
+        subject = ctk.CTkLabel(
+            row, text=email["subject"], font=ctk.CTkFont(size=13),
+            anchor="w", justify="left",
+        )
+        subject.pack(side="left", fill="x", expand=True, padx=(2, 6))
+
+        # Click the envelope/subject/sender to open the message in Outlook.
+        for widget in [envelope, subject] + ([detail_label] if detail_label else []):
+            widget.configure(cursor="hand2")
+            widget.bind("<Button-1>", lambda _event, em=email: self._open_email(em))
+
+    def _open_email(self, email):
+        if flagged_email_reader is None:
+            return
+        ok, error = flagged_email_reader.open_email(
+            email.get("entry_id", ""), email.get("store_id", "")
+        )
+        if not ok and error:
+            messagebox.showerror("Open email", error)
+
+    def _unflag_email(self, email, row):
+        if flagged_email_reader is None:
+            return
+        ok, error = flagged_email_reader.unflag_email(
+            email.get("entry_id", ""), email.get("store_id", "")
+        )
+        if not ok:
+            if error:
+                messagebox.showerror("Unflag email", error)
+            return
+        # Remove just this email — from the cache and the UI — without a
+        # full Outlook re-read.
+        flagged_email_reader.remove_from_cache(email.get("entry_id", ""))
+        if row in self._email_rows:
+            self._email_rows.remove(row)
+        row.destroy()
+        if not self._email_rows:
+            self._clear_emails()
+            self._show_email_message("No flagged emails — inbox is clear!")
 
 
 if __name__ == "__main__":

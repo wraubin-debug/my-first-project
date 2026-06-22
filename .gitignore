@@ -1,0 +1,11 @@
+# Generated cache of flagged Outlook emails — contains email subjects/senders.
+# Machine-specific and potentially sensitive; never commit.
+flagged_emails_cache.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Temp files
+_temp_shortcut.ps1
+*_err.log

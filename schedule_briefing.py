@@ -48,6 +48,31 @@ def register_scheduled_task(pythonw_path, briefing_script):
         sys.exit(1)
 
 
+def register_email_cache_task(pythonw_path, reader_script):
+    task_name = "Flagged Email Cache Refresh"
+    command = f'"{pythonw_path}" "{reader_script}" --refresh'
+
+    print("Registering flagged-email cache refresh task...")
+
+    result = subprocess.run(
+        [
+            "schtasks", "/create",
+            "/tn", task_name,
+            "/tr", command,
+            "/sc", "minute",
+            "/mo", "15",     # every 15 minutes
+            "/f",            # overwrite if it already exists
+        ],
+        capture_output=True, text=True,
+    )
+
+    if result.returncode == 0:
+        print(f"  '{task_name}' registered — refreshes the cache every 15 minutes.")
+    else:
+        print("  ERROR: Could not register cache refresh task.")
+        print(f"  {result.stderr.strip()}")
+
+
 def create_desktop_shortcut(pythonw_path, task_manager_script, script_dir, desktop):
     shortcut_path = os.path.join(desktop, "Task Manager.lnk")
 
@@ -89,10 +114,12 @@ def main():
     script_dir = str(Path(__file__).parent.resolve())
     briefing_script     = os.path.join(script_dir, "morning_briefing.py")
     task_manager_script = os.path.join(script_dir, "task_manager.py")
+    reader_script       = os.path.join(script_dir, "get_flagged_emails.py")
 
     for path, name in [
         (briefing_script,     "morning_briefing.py"),
         (task_manager_script, "task_manager.py"),
+        (reader_script,       "get_flagged_emails.py"),
     ]:
         if not os.path.exists(path):
             print(f"Error: {name} not found at {path}")
@@ -109,11 +136,13 @@ def main():
     print()
 
     register_scheduled_task(pythonw_path, briefing_script)
+    register_email_cache_task(pythonw_path, reader_script)
     create_desktop_shortcut(pythonw_path, task_manager_script, script_dir, desktop)
 
     print()
     print("All done!")
     print("  Morning Briefing: launches automatically every day at 9:00 AM")
+    print("  Email cache:      refreshes every 15 minutes in the background")
     print("  Task Manager:     shortcut on your Desktop")
     print()
     print("To change the time: Task Scheduler > Task Scheduler Library > 'Morning Briefing'")
