@@ -8,6 +8,12 @@ pending_unflags.json
 # Daily Claude-generated assistant briefing — built from your tasks/emails.
 assistant_briefing_cache.json
 
+# Rolling Claude-maintained topic memory — distilled from your real email.
+assistant_memory.json
+
+# Recent assistant chat turns — may mention real tasks/emails.
+assistant_chat.json
+
 # Python bytecode
 __pycache__/
 *.pyc

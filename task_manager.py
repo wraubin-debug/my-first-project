@@ -104,6 +104,8 @@ class TaskManagerApp(ctk.CTk):
         self._email_rows = []
         self._assistant_queue = queue.Queue()
         self._generating_briefing = False
+        self._chat_queue = queue.Queue()
+        self._chatting = False
 
         self._build_ui()
         self._refresh_projects()
@@ -116,6 +118,8 @@ class TaskManagerApp(ctk.CTk):
         # Show the cached assistant briefing instantly; like the email cache we
         # never call Claude on open — only when you click Regenerate.
         self._show_cached_briefing()
+        # Load the recent chat history into the transcript (no Claude call).
+        self._load_chat_history()
 
     def _build_ui(self):
         self.grid_columnconfigure(1, weight=1)
@@ -243,7 +247,10 @@ class TaskManagerApp(ctk.CTk):
         self._build_assistant_tab(assistant_tab)
 
     def _build_assistant_tab(self, parent):
-        parent.grid_rowconfigure(1, weight=1)
+        # Row 1 = briefing, row 3 = chat transcript. Both stretch; the chat area
+        # gets the larger share so there's room to talk.
+        parent.grid_rowconfigure(1, weight=2)
+        parent.grid_rowconfigure(3, weight=3)
         parent.grid_columnconfigure(0, weight=1)
 
         header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -272,6 +279,35 @@ class TaskManagerApp(ctk.CTk):
             parent, wrap="word", font=ctk.CTkFont(size=13), activate_scrollbars=True,
         )
         self.assistant_text.grid(row=1, column=0, sticky="nsew")
+
+        # ── Chat panel ────────────────────────────────────────────────────────
+        ctk.CTkLabel(
+            parent, text="Chat — give instructions, report progress, change priorities",
+            font=ctk.CTkFont(size=12, weight="bold"), anchor="w",
+        ).grid(row=2, column=0, sticky="ew", pady=(10, 4))
+
+        self.chat_transcript = ctk.CTkTextbox(
+            parent, wrap="word", font=ctk.CTkFont(size=13), activate_scrollbars=True,
+        )
+        self.chat_transcript.grid(row=3, column=0, sticky="nsew")
+        self.chat_transcript.configure(state="disabled")
+
+        input_row = ctk.CTkFrame(parent, fg_color="transparent")
+        input_row.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        input_row.grid_columnconfigure(0, weight=1)
+
+        self.chat_entry = ctk.CTkEntry(
+            input_row, placeholder_text="Message your assistant…",
+            font=ctk.CTkFont(size=13), height=36,
+        )
+        self.chat_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.chat_entry.bind("<Return>", lambda event: self._send_chat())
+
+        self.chat_button = ctk.CTkButton(
+            input_row, text="Send", width=80, height=36,
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._send_chat,
+        )
+        self.chat_button.grid(row=0, column=1)
 
     # ── Project actions ───────────────────────────────────────────────────────
 
@@ -689,6 +725,84 @@ class TaskManagerApp(ctk.CTk):
         _, updated = personal_assistant.read_cached_briefing()
         self._set_assistant_text(briefing)
         self.assistant_status.configure(text=f"Updated {updated}" if updated else "")
+
+    # ── Chat ──────────────────────────────────────────────────────────────────
+
+    def _append_chat_line(self, text):
+        self.chat_transcript.configure(state="normal")
+        if self.chat_transcript.get("1.0", "end").strip():
+            self.chat_transcript.insert("end", "\n\n")
+        self.chat_transcript.insert("end", text)
+        self.chat_transcript.configure(state="disabled")
+        self.chat_transcript.see("end")
+
+    def _load_chat_history(self):
+        """Populate the transcript from the saved chat turns (no Claude call)."""
+        if personal_assistant is None:
+            return
+        for turn in personal_assistant.read_chat():
+            who = "You" if turn.get("role") == "user" else "Assistant"
+            self._append_chat_line(f"{who}: {turn.get('text', '').strip()}")
+
+    def _send_chat(self):
+        if personal_assistant is None:
+            messagebox.showinfo("Personal Assistant", "Personal assistant unavailable.")
+            return
+        if self._chatting:
+            return  # a reply is already in flight
+        message = self.chat_entry.get().strip()
+        if not message:
+            return
+        self.chat_entry.delete(0, "end")
+        self._append_chat_line(f"You: {message}")
+        # Remember where the placeholder starts so we can swap it for the reply.
+        self._chat_pending_from = self.chat_transcript.index("end-1c")
+        self._append_chat_line("Assistant: thinking…")
+
+        self._chatting = True
+        self.chat_button.configure(state="disabled")
+        threading.Thread(target=self._chat_worker, args=(message,), daemon=True).start()
+        self.after(200, self._poll_chat_result)
+
+    def _chat_worker(self, message):
+        try:
+            reply, applied, error = personal_assistant.chat_with_assistant(message)
+        except Exception as worker_error:
+            reply, applied, error = "", "", f"Couldn't reach the assistant ({worker_error})"
+        self._chat_queue.put((reply, applied, error))
+
+    def _poll_chat_result(self):
+        try:
+            reply, applied, error = self._chat_queue.get_nowait()
+        except queue.Empty:
+            self.after(200, self._poll_chat_result)  # not ready yet
+            return
+        self._chatting = False
+        self.chat_button.configure(state="normal")
+
+        # Replace the "thinking…" placeholder with the real reply.
+        self.chat_transcript.configure(state="normal")
+        self.chat_transcript.delete(self._chat_pending_from, "end-1c")
+        self.chat_transcript.configure(state="disabled")
+
+        if error:
+            self._append_chat_line(f"Assistant: (error) {error}")
+            return
+        self._append_chat_line(f"Assistant: {reply}")
+        if applied:
+            self._append_chat_line(f"  ✓ Applied: {applied}")
+            self._reload_after_chat()
+
+    def _reload_after_chat(self):
+        """The assistant changed tasks on disk — reload them and resync the UI
+        and the phone HTML, the same way a normal save would."""
+        self.tasks = load_tasks()
+        self.projects = load_projects(self.tasks)
+        if self.current_project not in self.projects:
+            self.current_project = self.projects[0]
+        self._refresh_projects()
+        self._refresh_task_list()
+        regenerate_mobile_view()
 
 
 if __name__ == "__main__":

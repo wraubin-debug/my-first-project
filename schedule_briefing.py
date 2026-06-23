@@ -103,6 +103,33 @@ def register_assistant_briefing_task(pythonw_path, assistant_script):
         print(f"  {result.stderr.strip()}")
 
 
+def register_memory_update_task(pythonw_path, assistant_script):
+    # Fold the day's email into the rolling topic memory at 10:05 PM — just after
+    # the 10 PM apply-unflags batch, so the two nightly jobs don't overlap.
+    task_name = "Assistant Memory Update"
+    command = f'"{pythonw_path}" "{assistant_script}" --update-memory'
+
+    print("Registering nightly memory update (10:05 PM)...")
+
+    result = subprocess.run(
+        [
+            "schtasks", "/create",
+            "/tn", task_name,
+            "/tr", command,
+            "/sc", "daily",
+            "/st", "22:05",
+            "/f",            # overwrite if it already exists
+        ],
+        capture_output=True, text=True,
+    )
+
+    if result.returncode == 0:
+        print(f"  '{task_name}' registered — updates topic memory daily at 10:05 PM.")
+    else:
+        print("  ERROR: Could not register memory update task.")
+        print(f"  {result.stderr.strip()}")
+
+
 def register_apply_unflags_task(pythonw_path, reader_script):
     # Write any unflags you made in the app back to Outlook in one nightly
     # batch at 10 PM, so Outlook isn't poked while you're using it.
@@ -198,6 +225,7 @@ def main():
     register_email_cache_task(pythonw_path, reader_script)
     register_assistant_briefing_task(pythonw_path, assistant_script)
     register_apply_unflags_task(pythonw_path, reader_script)
+    register_memory_update_task(pythonw_path, assistant_script)
     create_desktop_shortcut(pythonw_path, task_manager_script, script_dir, desktop)
 
     print()
@@ -206,6 +234,7 @@ def main():
     print("  Email fetch:      reads flagged emails from Outlook daily at 7:00 AM")
     print("  Assistant brief:  Claude builds your daily plan at 7:05 AM")
     print("  Apply unflags:    writes your unflags back to Outlook daily at 10:00 PM")
+    print("  Memory update:    folds the day's email into topic memory at 10:05 PM")
     print("  Task Manager:     shortcut on your Desktop")
     print()
     print("These run while the screen is locked, as long as you're still logged in")
@@ -213,6 +242,8 @@ def main():
     print()
     print("To change a time: Task Scheduler > Task Scheduler Library > pick the task")
     print("To remove a task: schtasks /delete /tn \"Morning Briefing\" /f")
+    print("  (likewise for \"Flagged Email Cache Refresh\", \"Personal Assistant Briefing\",")
+    print("   \"Apply Unflagged Emails\", and \"Assistant Memory Update\")")
 
 
 if __name__ == "__main__":
