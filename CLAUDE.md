@@ -9,7 +9,8 @@ locally — no cloud services, no third-party storage.
 
 | File | Type | What it does |
 |------|------|--------------|
-| `task_manager.py` | Desktop GUI (CustomTkinter) | Main app: multiple projects, add/complete/delete tasks, and a live flagged-emails panel. |
+| `task_manager.py` | Desktop GUI (CustomTkinter) | Main app: two tabs — **Tasks** (multiple projects, add/complete/delete tasks, live flagged-emails panel) and **Assistant** (the Claude-powered daily briefing **plus a chat box** to talk to the assistant). |
+| `personal_assistant.py` | Library + CLI | Builds a daily plan: gathers pending tasks, cached flagged emails, the rolling topic memory, and any overnight Inbox mail, then asks the local `claude` CLI to act as a chief of staff and split the work into morning (high-focus) and afternoon (low-energy) action items. Also (a) maintains a **rolling topic memory** distilled nightly from the day's email (raw mail is discarded), and (b) powers the **chat** — instructions like "raise X to High / I finished Y / mark topic Z important" are sent to Claude, which replies and applies the changes to `tasks.json` / the memory. Caches the briefing to JSON. |
 | `morning_briefing.py` | Desktop GUI popup | Daily 9 AM popup: date, motivational quote, top 3 pending tasks, and flagged emails. Has an "Open Task Manager" button. |
 | `get_flagged_emails.py` | Library + CLI | Reads flagged emails from local Outlook (the "For Follow Up" search folder) via COM; caches them to JSON. Fetches once a day to keep Outlook responsive, and defers unflags to a nightly batch. Imported by both GUIs. |
 | `generate_mobile_view.py` | Library + CLI | Generates a self-contained `tasks.html` into OneDrive for phone viewing. |
@@ -21,7 +22,10 @@ locally — no cloud services, no third-party storage.
 - `tasks.json` — the task list (see structure below). Shared by **all** components.
 - `projects.json` — ordered list of project names, e.g. `["General", "Mercury", "BM Wave-2"]`. Lets empty projects persist.
 - `flagged_emails_cache.json` — cached flagged emails + a "last updated" label and machine-readable timestamp. **Gitignored** (contains real email subjects/senders).
-- `pending_unflags.json` — emails you unflagged in the app that haven't been written back to Outlook yet; drained by the nightly 10 PM batch. **Should be gitignored** (contains Outlook entry IDs).
+- `pending_unflags.json` — emails you unflagged in the app that haven't been written back to Outlook yet; drained by the nightly 10 PM batch. **Gitignored** (contains Outlook entry IDs).
+- `assistant_briefing_cache.json` — the latest Claude-generated briefing text + a "last updated" label and timestamp. **Gitignored** (built from real tasks/emails). Self-throttled to once a day after 7 AM, same as the flagged cache.
+- `assistant_memory.json` — the **rolling topic memory**: a small list of Claude-maintained topic summaries (`topic`, `summary`, `first_seen`, `last_updated`, `important`, `still_open`) distilled from the day's email each night. Replaces storing raw daily mail. **Gitignored** (built from real email). Self-throttled to once a day after 10 PM.
+- `assistant_chat.json` — the last ~20 chat turns between you and the assistant, kept for conversational continuity. **Gitignored** (may reference real tasks/emails).
 
 ### Generated output (outside the repo)
 
@@ -95,6 +99,10 @@ python generate_mobile_view.py        # regenerate the phone HTML on demand
 python get_flagged_emails.py          # print flagged emails (live read)
 python get_flagged_emails.py --refresh        # force the daily fetch + cache write (7 AM task)
 python get_flagged_emails.py --apply-unflags  # write queued unflags back to Outlook (10 PM task)
+python personal_assistant.py            # print the current briefing (generates it if the cache is stale)
+python personal_assistant.py --refresh  # force-regenerate the daily briefing via Claude (7:05 AM task)
+python personal_assistant.py --update-memory   # fold today's email into the rolling topic memory (10:05 PM task)
+python personal_assistant.py --chat "raise the China tax task to High"   # one-off chat turn (testing)
 python schedule_briefing.py   # one-time setup: scheduled tasks + desktop shortcut
 ```
 
@@ -102,7 +110,9 @@ python schedule_briefing.py   # one-time setup: scheduled tasks + desktop shortc
 
 - **"Morning Briefing"** — runs `morning_briefing.py` daily at 9:00 AM (interactive, so the window shows).
 - **"Flagged Email Cache Refresh"** — runs `get_flagged_emails.py --refresh` daily at 7:00 AM (via `pythonw`, no console window).
+- **"Personal Assistant Briefing"** — runs `personal_assistant.py --refresh` daily at 7:05 AM (just after the flagged fetch, so the briefing sees a fresh flagged cache).
 - **"Apply Unflagged Emails"** — runs `get_flagged_emails.py --apply-unflags` daily at 10:00 PM (writes queued unflags back to Outlook).
+- **"Assistant Memory Update"** — runs `personal_assistant.py --update-memory` daily at 10:05 PM (just after the unflag batch, so the two nightly jobs don't overlap; folds the day's email into the rolling topic memory).
 - A **"Task Manager"** shortcut on the Desktop.
 
 These tasks run while the screen is **locked**, as long as you're still logged in and the
@@ -110,7 +120,7 @@ machine is **awake** (not asleep/hibernated/shut down) at the scheduled time. If
 is asleep at 7 AM, the fetch is skipped — but the next time you open an app, `refresh_cache()`
 sees the cache is older than today's 7 AM and does a single catch-up read.
 
-To remove: `schtasks /delete /tn "Morning Briefing" /f` (and likewise for `"Flagged Email Cache Refresh"` and `"Apply Unflagged Emails"`).
+To remove: `schtasks /delete /tn "Morning Briefing" /f` (and likewise for `"Flagged Email Cache Refresh"`, `"Personal Assistant Briefing"`, `"Apply Unflagged Emails"`, and `"Assistant Memory Update"`).
 
 ### Phone access
 
@@ -121,6 +131,7 @@ read-only dashboard (data baked in) so it renders without fetching other files.
 
 - **`customtkinter`** — modern themed Tkinter UI. `pip install customtkinter`
 - **`pywin32`** — Outlook COM access for flagged emails. `pip install pywin32`
+- **`claude` CLI** — the Claude Code command-line tool, used by `personal_assistant.py` to generate the briefing. Already installed/authenticated on this machine; the module finds it via `shutil.which("claude")` and pipes the prompt over stdin (`claude -p`). If it's missing, the Assistant tab shows a friendly message and the rest of the app still works.
 
 `todo.py`, `generate_mobile_view.py`, and the data layer use only the standard library.
 If `pywin32` or Outlook is unavailable, the GUIs still run — the flagged-emails section
@@ -142,7 +153,25 @@ just shows a friendly message.
 - **No unnecessary abstractions.** Don't add classes, decorators, or patterns unless they genuinely simplify things.
 - **Short comments only when the reason isn't obvious.** Don't comment what the code already says clearly.
 
+## Personal Assistant briefing (how it works)
+
+- The **Assistant** tab in `task_manager.py` reads the cached briefing on open (no Claude call) and only regenerates when you click **Regenerate** or via the 7:05 AM scheduled task. Generation runs on a background thread and posts the result back through a `queue.Queue`, the same Tkinter-safe pattern as the flagged-email read.
+- `personal_assistant.py` builds the briefing prompt from four local inputs — pending tasks (`tasks.json`), the flagged-email cache, the **rolling topic memory** (`assistant_memory.json`), and a **light read of overnight Inbox mail** (the gap since last night's memory update; `get_overnight_emails`). It no longer re-reads a full day of raw Inbox at briefing time — that content now lives, distilled, in the topic memory. It then calls the local `claude` CLI.
+- The prompt encodes the user's energy model: **mornings are peak focus** (hardest/most important/deep work goes there) and **afternoons are low-energy** (lighter, reactive, admin, meetings). It also applies team-lead management principles (Eisenhower prioritization, unblocking the team first, delegation, protecting a deep-focus block). Output sections: MORNING, AFTERNOON, UPCOMING HIGH-PRIORITY, NOTES.
+
+### Rolling topic memory (nightly, `--update-memory`)
+
+- Instead of storing each day's raw email, a **10:05 PM** job (`update_memory_from_emails`) reads the day's Inbox (a generous **100 emails × 1500 chars**, fine at off-hours), hands Claude the existing topics + today's mail + the current open-task titles, and asks it to **fold each email into an existing topic or create a new one**. Claude returns the updated topic list as JSON; the raw emails are then discarded. Self-throttled to once a day after 10 PM (like the flagged cache), `force=True` from the scheduled task.
+- **Aging:** `prune_old_topics()` drops any topic not touched in **30 days** *unless* it's marked `important` or `still_open`. `still_open` is set by Claude during the nightly merge (true if the topic maps to an open task or an unresolved thread); `important` is set by you via chat and is **never cleared by the nightly merge** (`_reconcile_topics` preserves it, along with the earliest `first_seen`).
+
+### Chat (`chat_with_assistant`)
+
+- The Assistant tab has a **chat box** below the briefing (transcript + entry + Send; Enter sends). It uses the same background-thread + `queue.Queue` pattern; recent turns persist in `assistant_chat.json` and reload on open.
+- `chat_with_assistant()` sends Claude the user's message plus context: **all tasks with their ids**, the topic memory, and recent chat turns. Claude replies with a JSON object — a `reply` plus optional `task_updates` (by **id**, so auto-apply is unambiguous), `new_tasks`, and `memory` flags. `apply_chat_actions()` validates and writes the changes straight to `tasks.json` / the memory (priority must be High/Medium/Low; new tasks get a fresh `id`). Per the user's choice, changes **apply automatically** (no confirm gate), but the reply states what changed and the GUI shows an "✓ Applied: …" line, then reloads the Tasks tab and regenerates the phone HTML.
+
 ## Known gaps / planned
+
+- **Teams chat analysis (Phase 2, deferred):** the original request included analyzing Teams chats when the system locks. Deferred because "new" Teams has no COM automation and Graph is blocked on this tenant (see below), so there's no supported local way to read chat content. Lock *detection* is feasible (Windows session-lock events); reading the *chats* is the blocker. Revisit if a viable path appears (or wire a manual-paste fallback). *(Planned — not yet done.)*
 
 - **Task filter default:** the task list currently defaults to the **All** filter; the **Active** list should become the default. *(Planned — not yet done.)*
 - **Project ordering:** project order isn't user-editable yet; drag-and-drop reordering is planned. *(Planned — not yet done.)*

@@ -15,6 +15,11 @@ try:
 except ImportError:
     flagged_email_reader = None
 
+try:
+    import personal_assistant
+except ImportError:
+    personal_assistant = None
+
 EMAIL_FLAG_COLOR = "#f5a623"
 
 ctk.set_appearance_mode("dark")
@@ -97,6 +102,10 @@ class TaskManagerApp(ctk.CTk):
         self._email_queue = queue.Queue()
         self._loading_emails = False
         self._email_rows = []
+        self._assistant_queue = queue.Queue()
+        self._generating_briefing = False
+        self._chat_queue = queue.Queue()
+        self._chatting = False
 
         self._build_ui()
         self._refresh_projects()
@@ -106,6 +115,11 @@ class TaskManagerApp(ctk.CTk):
         # sluggish. Use the Refresh button to pull the latest on demand; the
         # scheduled 7 AM task also keeps the cache current.
         self._show_cached_emails()
+        # Show the cached assistant briefing instantly; like the email cache we
+        # never call Claude on open — only when you click Regenerate.
+        self._show_cached_briefing()
+        # Load the recent chat history into the transcript (no Claude call).
+        self._load_chat_history()
 
     def _build_ui(self):
         self.grid_columnconfigure(1, weight=1)
@@ -166,13 +180,21 @@ class TaskManagerApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"), command=self._add_task,
         ).grid(row=3, column=0, sticky="ew", padx=12, pady=12)
 
-        # ── Right content ─────────────────────────────────────────────────────
+        # ── Right content (tabbed: Tasks | Assistant) ─────────────────────────
         right = ctk.CTkFrame(self, fg_color="transparent")
         right.grid(row=0, column=1, sticky="nsew", padx=16, pady=16)
-        right.grid_rowconfigure(1, weight=1)
+        right.grid_rowconfigure(0, weight=1)
         right.grid_columnconfigure(0, weight=1)
 
-        topbar = ctk.CTkFrame(right, fg_color="transparent")
+        tabview = ctk.CTkTabview(right)
+        tabview.grid(row=0, column=0, sticky="nsew")
+        tasks_tab = tabview.add("Tasks")
+        assistant_tab = tabview.add("Assistant")
+
+        tasks_tab.grid_rowconfigure(1, weight=1)
+        tasks_tab.grid_columnconfigure(0, weight=1)
+
+        topbar = ctk.CTkFrame(tasks_tab, fg_color="transparent")
         topbar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         topbar.grid_columnconfigure(1, weight=1)
 
@@ -190,17 +212,17 @@ class TaskManagerApp(ctk.CTk):
                 command=self._refresh_task_list,
             ).pack(side="left", padx=(12, 0))
 
-        self.task_scroll = ctk.CTkScrollableFrame(right)
+        self.task_scroll = ctk.CTkScrollableFrame(tasks_tab)
         self.task_scroll.grid(row=1, column=0, sticky="nsew")
         self.task_scroll.grid_columnconfigure(0, weight=1)
 
         self.stats_label = ctk.CTkLabel(
-            right, text="", font=ctk.CTkFont(size=12), text_color="gray", anchor="w"
+            tasks_tab, text="", font=ctk.CTkFont(size=12), text_color="gray", anchor="w"
         )
         self.stats_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
 
         # Flagged emails panel (fixed height, below the task list)
-        email_panel = ctk.CTkFrame(right, corner_radius=8)
+        email_panel = ctk.CTkFrame(tasks_tab, corner_radius=8)
         email_panel.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         email_panel.grid_columnconfigure(0, weight=1)
 
@@ -221,6 +243,71 @@ class TaskManagerApp(ctk.CTk):
         self.email_scroll = ctk.CTkScrollableFrame(email_panel, height=130, fg_color="transparent")
         self.email_scroll.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 10))
         self.email_scroll.grid_columnconfigure(0, weight=1)
+
+        self._build_assistant_tab(assistant_tab)
+
+    def _build_assistant_tab(self, parent):
+        # Only the briefing (row 1) stretches. The chat transcript (row 3) keeps
+        # a fixed short height so it stays a small strip at the bottom.
+        parent.grid_rowconfigure(1, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+
+        header = ctk.CTkFrame(parent, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(4, 8))
+        header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            header, text="Personal Assistant",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+
+        self.assistant_status = ctk.CTkLabel(
+            header, text="", font=ctk.CTkFont(size=11), text_color="gray", anchor="e"
+        )
+        self.assistant_status.grid(row=0, column=1, sticky="e", padx=(8, 8))
+
+        self.assistant_button = ctk.CTkButton(
+            header, text="Regenerate", width=100, height=30,
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._regenerate_briefing,
+        )
+        self.assistant_button.grid(row=0, column=2, sticky="e")
+
+        # The briefing is plain text from Claude; a read-only textbox shows it
+        # with wrapping and scrolling.
+        self.assistant_text = ctk.CTkTextbox(
+            parent, wrap="word", font=ctk.CTkFont(size=13), activate_scrollbars=True,
+        )
+        self.assistant_text.grid(row=1, column=0, sticky="nsew")
+
+        # ── Chat panel ────────────────────────────────────────────────────────
+        ctk.CTkLabel(
+            parent, text="Chat — give instructions, report progress, change priorities",
+            font=ctk.CTkFont(size=12, weight="bold"), anchor="w",
+        ).grid(row=2, column=0, sticky="ew", pady=(10, 4))
+
+        self.chat_transcript = ctk.CTkTextbox(
+            parent, wrap="word", font=ctk.CTkFont(size=13),
+            activate_scrollbars=True, height=110,
+        )
+        self.chat_transcript.grid(row=3, column=0, sticky="ew")
+        self.chat_transcript.configure(state="disabled")
+
+        input_row = ctk.CTkFrame(parent, fg_color="transparent")
+        input_row.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        input_row.grid_columnconfigure(0, weight=1)
+
+        self.chat_entry = ctk.CTkEntry(
+            input_row, placeholder_text="Message your assistant…",
+            font=ctk.CTkFont(size=13), height=36,
+        )
+        self.chat_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.chat_entry.bind("<Return>", lambda event: self._send_chat())
+
+        self.chat_button = ctk.CTkButton(
+            input_row, text="Send", width=80, height=36,
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._send_chat,
+        )
+        self.chat_button.grid(row=0, column=1)
 
     # ── Project actions ───────────────────────────────────────────────────────
 
@@ -578,6 +665,144 @@ class TaskManagerApp(ctk.CTk):
         if not self._email_rows:
             self._clear_emails()
             self._show_email_message("No flagged emails — inbox is clear!")
+
+    # ── Personal Assistant ──────────────────────────────────────────────────--
+
+    def _set_assistant_text(self, text):
+        self.assistant_text.configure(state="normal")
+        self.assistant_text.delete("1.0", "end")
+        self.assistant_text.insert("1.0", text)
+        self.assistant_text.configure(state="disabled")
+
+    def _show_cached_briefing(self):
+        """Display the cached briefing immediately (no Claude call)."""
+        if personal_assistant is None:
+            self._set_assistant_text("Personal assistant unavailable.")
+            return
+        briefing, updated = personal_assistant.read_cached_briefing()
+        if briefing:
+            self._set_assistant_text(briefing)
+            self.assistant_status.configure(text=f"Updated {updated}" if updated else "")
+        else:
+            self._set_assistant_text(
+                "No briefing yet.\n\nClick Regenerate to have Claude review your "
+                "tasks, flagged emails, and yesterday's mail, then plan your "
+                "morning and afternoon."
+            )
+
+    def _regenerate_briefing(self):
+        if personal_assistant is None:
+            self._set_assistant_text("Personal assistant unavailable.")
+            return
+        if self._generating_briefing:
+            return  # a generation is already running
+        self._generating_briefing = True
+        self.assistant_button.configure(state="disabled")
+        self.assistant_status.configure(text="Asking Claude…")
+        # Claude can take a while; run it off the main thread so the UI stays live.
+        threading.Thread(target=self._briefing_worker, daemon=True).start()
+        self.after(200, self._poll_briefing_result)
+
+    def _briefing_worker(self):
+        try:
+            briefing, error = personal_assistant.generate_briefing(force=True)
+        except Exception as worker_error:
+            briefing, error = "", f"Couldn't generate briefing ({worker_error})"
+        self._assistant_queue.put((briefing, error))
+
+    def _poll_briefing_result(self):
+        try:
+            briefing, error = self._assistant_queue.get_nowait()
+        except queue.Empty:
+            self.after(200, self._poll_briefing_result)  # not ready yet
+            return
+        self._generating_briefing = False
+        self.assistant_button.configure(state="normal")
+        if error:
+            self.assistant_status.configure(text="")
+            messagebox.showerror("Personal Assistant", error)
+            return
+        _, updated = personal_assistant.read_cached_briefing()
+        self._set_assistant_text(briefing)
+        self.assistant_status.configure(text=f"Updated {updated}" if updated else "")
+
+    # ── Chat ──────────────────────────────────────────────────────────────────
+
+    def _append_chat_line(self, text):
+        self.chat_transcript.configure(state="normal")
+        if self.chat_transcript.get("1.0", "end").strip():
+            self.chat_transcript.insert("end", "\n\n")
+        self.chat_transcript.insert("end", text)
+        self.chat_transcript.configure(state="disabled")
+        self.chat_transcript.see("end")
+
+    def _load_chat_history(self):
+        """Populate the transcript from the saved chat turns (no Claude call)."""
+        if personal_assistant is None:
+            return
+        for turn in personal_assistant.read_chat():
+            who = "You" if turn.get("role") == "user" else "Assistant"
+            self._append_chat_line(f"{who}: {turn.get('text', '').strip()}")
+
+    def _send_chat(self):
+        if personal_assistant is None:
+            messagebox.showinfo("Personal Assistant", "Personal assistant unavailable.")
+            return
+        if self._chatting:
+            return  # a reply is already in flight
+        message = self.chat_entry.get().strip()
+        if not message:
+            return
+        self.chat_entry.delete(0, "end")
+        self._append_chat_line(f"You: {message}")
+        # Remember where the placeholder starts so we can swap it for the reply.
+        self._chat_pending_from = self.chat_transcript.index("end-1c")
+        self._append_chat_line("Assistant: thinking…")
+
+        self._chatting = True
+        self.chat_button.configure(state="disabled")
+        threading.Thread(target=self._chat_worker, args=(message,), daemon=True).start()
+        self.after(200, self._poll_chat_result)
+
+    def _chat_worker(self, message):
+        try:
+            reply, applied, error = personal_assistant.chat_with_assistant(message)
+        except Exception as worker_error:
+            reply, applied, error = "", "", f"Couldn't reach the assistant ({worker_error})"
+        self._chat_queue.put((reply, applied, error))
+
+    def _poll_chat_result(self):
+        try:
+            reply, applied, error = self._chat_queue.get_nowait()
+        except queue.Empty:
+            self.after(200, self._poll_chat_result)  # not ready yet
+            return
+        self._chatting = False
+        self.chat_button.configure(state="normal")
+
+        # Replace the "thinking…" placeholder with the real reply.
+        self.chat_transcript.configure(state="normal")
+        self.chat_transcript.delete(self._chat_pending_from, "end-1c")
+        self.chat_transcript.configure(state="disabled")
+
+        if error:
+            self._append_chat_line(f"Assistant: (error) {error}")
+            return
+        self._append_chat_line(f"Assistant: {reply}")
+        if applied:
+            self._append_chat_line(f"  ✓ Applied: {applied}")
+            self._reload_after_chat()
+
+    def _reload_after_chat(self):
+        """The assistant changed tasks on disk — reload them and resync the UI
+        and the phone HTML, the same way a normal save would."""
+        self.tasks = load_tasks()
+        self.projects = load_projects(self.tasks)
+        if self.current_project not in self.projects:
+            self.current_project = self.projects[0]
+        self._refresh_projects()
+        self._refresh_task_list()
+        regenerate_mobile_view()
 
 
 if __name__ == "__main__":
