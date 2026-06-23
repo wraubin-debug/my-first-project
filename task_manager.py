@@ -247,10 +247,9 @@ class TaskManagerApp(ctk.CTk):
         self._build_assistant_tab(assistant_tab)
 
     def _build_assistant_tab(self, parent):
-        # Row 1 = briefing, row 3 = chat transcript. Both stretch; the chat area
-        # gets the larger share so there's room to talk.
-        parent.grid_rowconfigure(1, weight=2)
-        parent.grid_rowconfigure(3, weight=3)
+        # Only the briefing (row 1) stretches. The chat transcript (row 3) keeps
+        # a fixed short height so it stays a small strip at the bottom.
+        parent.grid_rowconfigure(1, weight=1)
         parent.grid_columnconfigure(0, weight=1)
 
         header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -287,9 +286,10 @@ class TaskManagerApp(ctk.CTk):
         ).grid(row=2, column=0, sticky="ew", pady=(10, 4))
 
         self.chat_transcript = ctk.CTkTextbox(
-            parent, wrap="word", font=ctk.CTkFont(size=13), activate_scrollbars=True,
+            parent, wrap="word", font=ctk.CTkFont(size=13),
+            activate_scrollbars=True, height=110,
         )
-        self.chat_transcript.grid(row=3, column=0, sticky="nsew")
+        self.chat_transcript.grid(row=3, column=0, sticky="ew")
         self.chat_transcript.configure(state="disabled")
 
         input_row = ctk.CTkFrame(parent, fg_color="transparent")
