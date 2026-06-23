@@ -7,7 +7,7 @@
   },
   {
     "title": "Practice what I have learned",
-    "done": false,
+    "done": true,
     "id": 2,
     "project": "General"
   },
@@ -15,7 +15,7 @@
     "id": 4,
     "title": "Build Agent",
     "priority": "High",
-    "done": false,
+    "done": true,
     "project": "General"
   },
   {
@@ -31,5 +31,26 @@
     "priority": "High",
     "done": false,
     "project": "BM Wave-2"
+  },
+  {
+    "id": 7,
+    "title": "Rearrange Projects",
+    "priority": "High",
+    "done": false,
+    "project": "General"
+  },
+  {
+    "id": 8,
+    "title": "Make active group as default",
+    "priority": "High",
+    "done": false,
+    "project": "General"
+  },
+  {
+    "id": 9,
+    "title": "Add an input window in Personal Assistant to input MOM and other instructions",
+    "priority": "High",
+    "done": false,
+    "project": "General"
   }
 ]
