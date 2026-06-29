@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def find_pythonw():
-    """Use pythonw.exe so no console window flashes at 9 AM."""
+    """Use pythonw.exe so no console window flashes when tasks run."""
     pythonw = Path(sys.executable).parent / "pythonw.exe"
     return str(pythonw) if pythonw.exists() else sys.executable
 
@@ -20,32 +20,6 @@ def get_desktop_path():
     if desktop and os.path.isdir(desktop):
         return desktop
     return str(Path.home() / "Desktop")
-
-
-def register_scheduled_task(pythonw_path, briefing_script):
-    task_name = "Morning Briefing"
-    command = f'"{pythonw_path}" "{briefing_script}"'
-
-    print("Registering Windows scheduled task...")
-
-    result = subprocess.run(
-        [
-            "schtasks", "/create",
-            "/tn", task_name,
-            "/tr", command,
-            "/sc", "daily",
-            "/st", "09:00",
-            "/f",           # overwrite if the task already exists
-        ],
-        capture_output=True, text=True,
-    )
-
-    if result.returncode == 0:
-        print(f"  '{task_name}' registered — runs every day at 9:00 AM.")
-    else:
-        print(f"  ERROR: Could not register task.")
-        print(f"  {result.stderr.strip()}")
-        sys.exit(1)
 
 
 def register_email_cache_task(pythonw_path, reader_script):
@@ -196,13 +170,11 @@ $s.Save()
 
 def main():
     script_dir = str(Path(__file__).parent.resolve())
-    briefing_script     = os.path.join(script_dir, "morning_briefing.py")
     task_manager_script = os.path.join(script_dir, "task_manager.py")
     reader_script       = os.path.join(script_dir, "get_flagged_emails.py")
     assistant_script    = os.path.join(script_dir, "personal_assistant.py")
 
     for path, name in [
-        (briefing_script,     "morning_briefing.py"),
         (task_manager_script, "task_manager.py"),
         (reader_script,       "get_flagged_emails.py"),
         (assistant_script,    "personal_assistant.py"),
@@ -214,14 +186,13 @@ def main():
     pythonw_path = find_pythonw()
     desktop      = get_desktop_path()
 
-    print("Morning Briefing Setup")
+    print("Morning Agent Setup")
     print("=" * 44)
     print(f"Python:  {pythonw_path}")
     print(f"Scripts: {script_dir}")
     print(f"Desktop: {desktop}")
     print()
 
-    register_scheduled_task(pythonw_path, briefing_script)
     register_email_cache_task(pythonw_path, reader_script)
     register_assistant_briefing_task(pythonw_path, assistant_script)
     register_apply_unflags_task(pythonw_path, reader_script)
@@ -230,7 +201,6 @@ def main():
 
     print()
     print("All done!")
-    print("  Morning Briefing: launches automatically every day at 9:00 AM")
     print("  Email fetch:      reads flagged emails from Outlook daily at 7:00 AM")
     print("  Assistant brief:  Claude builds your daily plan at 7:05 AM")
     print("  Apply unflags:    writes your unflags back to Outlook daily at 10:00 PM")
@@ -241,8 +211,8 @@ def main():
     print("and the machine is awake (not asleep/shut down) at those times.")
     print()
     print("To change a time: Task Scheduler > Task Scheduler Library > pick the task")
-    print("To remove a task: schtasks /delete /tn \"Morning Briefing\" /f")
-    print("  (likewise for \"Flagged Email Cache Refresh\", \"Personal Assistant Briefing\",")
+    print("To remove a task: schtasks /delete /tn \"Flagged Email Cache Refresh\" /f")
+    print("  (likewise for \"Personal Assistant Briefing\",")
     print("   \"Apply Unflagged Emails\", and \"Assistant Memory Update\")")
 
 

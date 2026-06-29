@@ -410,6 +410,12 @@ management principles:
 - Flag work that should be delegated rather than done personally.
 - Protect one block of deep-focus time; don't fragment the morning with small stuff.
 
+Stay grounded — do NOT invent relationships between items. The tasks, emails, and
+topics below are independent unless an input explicitly says otherwise. Never claim
+one task "feeds", "relates to", or "should be done together with" another, and never
+assume two items are the same project just because they sound similar. If you group
+items, only group ones the inputs actually connect; otherwise treat each on its own.
+
 Energy model for THIS person (important):
 - They are MOST productive in the MORNING. Put the hardest, most cognitively
   demanding, and highest-priority/important work here — deep focus, decisions,
@@ -443,7 +449,8 @@ UPCOMING HIGH-PRIORITY
 NOTES
 - 1 to 3 brief management observations: what to delegate, what to protect, what's at risk.
 
-Be specific and reference the actual tasks/emails/topics above. Keep it tight and scannable."""
+Be specific and reference the actual tasks/emails/topics above — but only as they
+appear, without inventing links between them. Keep it tight and scannable."""
 
 
 # ── Calling Claude ────────────────────────────────────────────────────────────

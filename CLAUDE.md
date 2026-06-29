@@ -1,7 +1,7 @@
 # Morning Agent — Task Manager & Briefing
 
 A personal productivity suite in Python for Windows. It started as a CLI to-do
-list and grew into a desktop task manager, a daily morning-briefing popup, a
+list and grew into a desktop task manager, a Claude-powered daily briefing, a
 phone-friendly view, and an Outlook flagged-email summary. Everything runs
 locally — no cloud services, no third-party storage.
 
@@ -9,10 +9,9 @@ locally — no cloud services, no third-party storage.
 
 | File | Type | What it does |
 |------|------|--------------|
-| `task_manager.py` | Desktop GUI (CustomTkinter) | Main app: two tabs — **Tasks** (multiple projects, add/complete/delete tasks, live flagged-emails panel) and **Assistant** (the Claude-powered daily briefing **plus a chat box** to talk to the assistant). |
+| `task_manager.py` | Desktop GUI (CustomTkinter) | Main app (light theme): two tabs — **Tasks** (multiple projects, add/complete/delete tasks, **drag the ↕ handle to reorder projects**, live flagged-emails panel) and **Assistant** (the Claude-powered daily briefing **plus a chat box** to talk to the assistant). |
 | `personal_assistant.py` | Library + CLI | Builds a daily plan: gathers pending tasks, cached flagged emails, the rolling topic memory, and any overnight Inbox mail, then asks the local `claude` CLI to act as a chief of staff and split the work into morning (high-focus) and afternoon (low-energy) action items. Also (a) maintains a **rolling topic memory** distilled nightly from the day's email (raw mail is discarded), and (b) powers the **chat** — instructions like "raise X to High / I finished Y / mark topic Z important" are sent to Claude, which replies and applies the changes to `tasks.json` / the memory. Caches the briefing to JSON. |
-| `morning_briefing.py` | Desktop GUI popup | Daily 9 AM popup: date, motivational quote, top 3 pending tasks, and flagged emails. Has an "Open Task Manager" button. |
-| `get_flagged_emails.py` | Library + CLI | Reads flagged emails from local Outlook (the "For Follow Up" search folder) via COM; caches them to JSON. Fetches once a day to keep Outlook responsive, and defers unflags to a nightly batch. Imported by both GUIs. |
+| `get_flagged_emails.py` | Library + CLI | Reads flagged emails from local Outlook (the "For Follow Up" search folder) via COM; caches them to JSON. Fetches once a day to keep Outlook responsive, and defers unflags to a nightly batch. Imported by `task_manager.py`. |
 | `generate_mobile_view.py` | Library + CLI | Generates a self-contained `tasks.html` into OneDrive for phone viewing. |
 | `schedule_briefing.py` | Setup script | Registers Windows scheduled tasks + creates a desktop shortcut. Run once. |
 | `todo.py` | CLI (legacy) | The original terminal to-do app. Still works; reads/writes the same `tasks.json`. |
@@ -40,12 +39,12 @@ locally — no cloud services, no third-party storage.
                           │                        │
    task_manager.py ───────┼──► generate_mobile_view.py ──► OneDrive/tasks.html (phone)
         │                 │
-        │ reads/writes    └──── morning_briefing.py (also reads tasks.json)
+        │ reads/writes    └──── personal_assistant.py (also reads tasks.json)
         ▼
    get_flagged_emails.py ──► Outlook (COM) ──► flagged_emails_cache.json
         ▲                                              ▲
-        │ both GUIs read the cache instantly,          │
-        └── then refresh it in the background          │
+        │ the app reads the cache instantly,           │
+        └── then refreshes it on demand                │
                                                        │
    schedule_briefing.py registers a task that runs ────┘
    `get_flagged_emails.py --refresh` every 15 minutes
@@ -63,7 +62,7 @@ locally — no cloud services, no third-party storage.
 ## `tasks.json` data structure
 
 A **flat JSON array** of task objects (kept flat for backward compatibility with
-`todo.py` and `morning_briefing.py`):
+`todo.py`):
 
 ```json
 [
@@ -93,7 +92,6 @@ A **flat JSON array** of task objects (kept flat for backward compatibility with
 
 ```
 python task_manager.py        # main desktop app
-python morning_briefing.py    # the briefing popup (normally auto-runs at 9 AM)
 python todo.py                # legacy terminal version
 python generate_mobile_view.py        # regenerate the phone HTML on demand
 python get_flagged_emails.py          # print flagged emails (live read)
@@ -108,7 +106,6 @@ python schedule_briefing.py   # one-time setup: scheduled tasks + desktop shortc
 
 ### One-time setup (`schedule_briefing.py`) registers:
 
-- **"Morning Briefing"** — runs `morning_briefing.py` daily at 9:00 AM (interactive, so the window shows).
 - **"Flagged Email Cache Refresh"** — runs `get_flagged_emails.py --refresh` daily at 7:00 AM (via `pythonw`, no console window).
 - **"Personal Assistant Briefing"** — runs `personal_assistant.py --refresh` daily at 7:05 AM (just after the flagged fetch, so the briefing sees a fresh flagged cache).
 - **"Apply Unflagged Emails"** — runs `get_flagged_emails.py --apply-unflags` daily at 10:00 PM (writes queued unflags back to Outlook).
@@ -120,7 +117,7 @@ machine is **awake** (not asleep/hibernated/shut down) at the scheduled time. If
 is asleep at 7 AM, the fetch is skipped — but the next time you open an app, `refresh_cache()`
 sees the cache is older than today's 7 AM and does a single catch-up read.
 
-To remove: `schtasks /delete /tn "Morning Briefing" /f` (and likewise for `"Flagged Email Cache Refresh"`, `"Personal Assistant Briefing"`, `"Apply Unflagged Emails"`, and `"Assistant Memory Update"`).
+To remove: `schtasks /delete /tn "Flagged Email Cache Refresh" /f` (and likewise for `"Personal Assistant Briefing"`, `"Apply Unflagged Emails"`, and `"Assistant Memory Update"`).
 
 ### Phone access
 
@@ -174,7 +171,6 @@ just shows a friendly message.
 - **Teams chat analysis (Phase 2, deferred):** the original request included analyzing Teams chats when the system locks. Deferred because "new" Teams has no COM automation and Graph is blocked on this tenant (see below), so there's no supported local way to read chat content. Lock *detection* is feasible (Windows session-lock events); reading the *chats* is the blocker. Revisit if a viable path appears (or wire a manual-paste fallback). *(Planned — not yet done.)*
 
 - **Task filter default:** the task list currently defaults to the **All** filter; the **Active** list should become the default. *(Planned — not yet done.)*
-- **Project ordering:** project order isn't user-editable yet; drag-and-drop reordering is planned. *(Planned — not yet done.)*
 - **Phone view is read-only:** editing tasks from the phone isn't possible (no backend, by design — keeps everything local).
 - **Phone view freshness:** `tasks.html` only updates when `task_manager.py` saves a change; it isn't regenerated by the CLI or the briefing.
 - **Only the primary mailbox's flagged items:** reading the "For Follow Up" search folder covers all folders of the primary mailbox, but **not** separate delegate/archive mailboxes. This was a deliberate trade-off to keep Outlook responsive (the old code swept every store, which made Outlook sluggish). Re-add per-store reads if those mailboxes are ever needed.

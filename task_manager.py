@@ -22,17 +22,19 @@ except ImportError:
 
 EMAIL_FLAG_COLOR = "#f5a623"
 
-ctk.set_appearance_mode("dark")
+ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
 
 TASKS_FILE = "tasks.json"
 PROJECTS_FILE = "projects.json"
 DEFAULT_PROJECT = "General"
 PRIORITY_ORDER = {"High": 0, "Medium": 1, "Low": 2}
+# Each priority color is a (light-theme, dark-theme) pair: the light value is
+# darkened so it stays readable on a white background.
 PRIORITY_COLORS = {
-    "High": "#ff6b6b",
-    "Medium": "#ffd93d",
-    "Low": "#6bcb77",
+    "High": ("#d62828", "#ff6b6b"),
+    "Medium": ("#c08a00", "#ffd93d"),
+    "Low": ("#2f9e44", "#6bcb77"),
 }
 
 
@@ -106,6 +108,9 @@ class TaskManagerApp(ctk.CTk):
         self._generating_briefing = False
         self._chat_queue = queue.Queue()
         self._chatting = False
+        # The project name currently being dragged to reorder, or None.
+        self._drag_project = None
+        self._project_row_by_name = {}
 
         self._build_ui()
         self._refresh_projects()
@@ -391,6 +396,7 @@ class TaskManagerApp(ctk.CTk):
     def _refresh_projects(self):
         for widget in self.project_scroll.winfo_children():
             widget.destroy()
+        self._project_row_by_name = {}
 
         for name in self.projects:
             count = sum(
@@ -401,7 +407,19 @@ class TaskManagerApp(ctk.CTk):
 
             row = ctk.CTkFrame(self.project_scroll, fg_color="transparent")
             row.pack(fill="x", pady=2)
-            row.grid_columnconfigure(0, weight=1)
+            row.grid_columnconfigure(1, weight=1)
+            self._project_row_by_name[name] = row
+
+            # Drag handle — grab this to reorder the project. It's separate from
+            # the select button so a normal click still just selects the project.
+            handle = ctk.CTkLabel(
+                row, text="↕", width=20, text_color=("#999999", "#666666"),
+                font=ctk.CTkFont(size=14), cursor="fleur",
+            )
+            handle.grid(row=0, column=0)
+            handle.bind("<Button-1>", lambda _e, n=name: self._start_project_drag(n))
+            handle.bind("<B1-Motion>", self._on_project_drag)
+            handle.bind("<ButtonRelease-1>", self._end_project_drag)
 
             label = f"{name}  ({count})" if count else name
             ctk.CTkButton(
@@ -410,10 +428,10 @@ class TaskManagerApp(ctk.CTk):
                 anchor="w",
                 height=34,
                 fg_color="#1f6aa5" if is_current else "transparent",
-                hover_color="#144870" if is_current else "#2b2b2b",
-                text_color="white" if is_current else "#bbbbbb",
+                hover_color="#144870" if is_current else ("#e0e0e0", "#2b2b2b"),
+                text_color="white" if is_current else ("#444444", "#bbbbbb"),
                 command=lambda n=name: self._select_project(n),
-            ).grid(row=0, column=0, sticky="ew")
+            ).grid(row=0, column=1, sticky="ew")
 
             ctk.CTkButton(
                 row,
@@ -424,7 +442,52 @@ class TaskManagerApp(ctk.CTk):
                 hover_color="#7b2d2d",
                 text_color="#888888",
                 command=lambda n=name: self._delete_project(n),
-            ).grid(row=0, column=1, padx=(4, 0))
+            ).grid(row=0, column=2, padx=(4, 0))
+
+    # ── Drag-to-reorder projects ──────────────────────────────────────────────
+
+    def _start_project_drag(self, name):
+        self._drag_project = name
+
+    def _on_project_drag(self, event):
+        """As the pointer moves, slot the dragged project into its new position
+        and re-pack the rows live so you see the order change under the cursor."""
+        if self._drag_project is None:
+            return
+        target = self._project_drop_index(event.y_root)
+        current = self.projects.index(self._drag_project)
+        if target != current:
+            self.projects.pop(current)
+            self.projects.insert(target, self._drag_project)
+            self._repack_projects()
+
+    def _end_project_drag(self, _event):
+        if self._drag_project is None:
+            return
+        self._drag_project = None
+        save_projects(self.projects)
+        self._refresh_projects()  # rebuild fully so counts/highlight are correct
+
+    def _project_drop_index(self, y_root):
+        """Which slot the pointer is over — count the project rows whose vertical
+        midpoint sits above the pointer."""
+        index = 0
+        for name in self.projects:
+            row = self._project_row_by_name.get(name)
+            if row is None:
+                continue
+            if y_root > row.winfo_rooty() + row.winfo_height() / 2:
+                index += 1
+        return min(index, len(self.projects) - 1)
+
+    def _repack_projects(self):
+        """Re-pack the existing project rows in the current order. We move the
+        same widgets (no destroy) so the in-progress drag keeps its mouse grab
+        on the handle."""
+        for row in self._project_row_by_name.values():
+            row.pack_forget()
+        for name in self.projects:
+            self._project_row_by_name[name].pack(fill="x", pady=2)
 
     def _refresh_task_list(self):
         for widget in self.task_scroll.winfo_children():
@@ -480,7 +543,7 @@ class TaskManagerApp(ctk.CTk):
             row,
             text=task["title"],
             font=ctk.CTkFont(size=13, overstrike=is_done),
-            text_color="gray" if is_done else "white",
+            text_color="gray" if is_done else ("#1a1a1a", "white"),
             anchor="w",
         ).pack(side="left", fill="x", expand=True, padx=(2, 8))
 
