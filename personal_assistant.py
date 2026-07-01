@@ -51,6 +51,15 @@ BODY_SNIPPET_CHARS = 1500
 OVERNIGHT_EMAIL_LIMIT = 30
 OVERNIGHT_SNIPPET_CHARS = 400
 
+# Who "me" is. This lets Claude tell whether an email actually asks the user to
+# act (they're in the To line, or @-mentioned in the body) versus is just an FYI
+# or a watchpoint. Matched loosely against the To line and body text.
+USER_NAME = "Sam Abraham, Robin"
+USER_EMAIL = "robin.sam.abraham@accenture.com"
+# Ways the user shows up in an @-mention in a mail body (e.g. "@Robin Sam Abraham").
+# If any of these follows an "@" in the body, that mail is treated as mine to act on.
+USER_MENTION_NAMES = ["Robin Sam Abraham", "Robin"]
+
 # Topics not touched in this many days are flushed (unless important / still open).
 MEMORY_MAX_AGE_DAYS = 30
 # How many chat turns to keep for continuity.
@@ -101,10 +110,22 @@ def _find_primary_inbox(namespace):
     return best_inbox
 
 
+def _mentions_user(text):
+    """True if the user is @-mentioned in the text (e.g. "@Robin Sam Abraham").
+    Checked against the full email body, so a mention deep in a thread isn't
+    missed by the snippet cutoff. The name must end at a word boundary so
+    "@Robin" doesn't match "@Robinson" or a "@robin..." email domain."""
+    for name in USER_MENTION_NAMES:
+        pattern = r"@" + re.escape(name) + r"\b"
+        if re.search(pattern, text, re.IGNORECASE):
+            return True
+    return False
+
+
 def read_inbox_between(start, end, limit, snippet_chars):
     """Return (emails, error) for Inbox messages received in [start, end).
 
-    Each email is a dict: subject, sender, received (time string), snippet.
+    Each email is a dict: subject, sender, to, mentions_me, received, snippet.
     One date-restricted read of the primary mailbox's Inbox — light on Outlook,
     the same spirit as get_flagged_emails. error is None on success."""
     try:
@@ -145,6 +166,8 @@ def read_inbox_between(start, end, limit, snippet_chars):
             emails.append({
                 "subject": (getattr(item, "Subject", "") or "(no subject)").strip(),
                 "sender": (getattr(item, "SenderName", "") or "").strip(),
+                "to": (getattr(item, "To", "") or "").strip(),
+                "mentions_me": _mentions_user(body),
                 "received": received_dt.strftime("%b %d %I:%M %p") if received_dt else "",
                 "snippet": snippet,
             })
@@ -219,6 +242,11 @@ def format_memory_for_prompt(topics):
             tags.append("IMPORTANT")
         if topic.get("still_open"):
             tags.append("open")
+        awaiting = (topic.get("awaiting") or "").strip()
+        if awaiting.lower() == "me":
+            tags.append("MINE TO ACT")
+        elif awaiting:
+            tags.append(f"awaiting: {awaiting}")
         tag_text = f" [{', '.join(tags)}]" if tags else ""
         dates = f"(since {topic.get('first_seen', '?')}, updated {topic.get('last_updated', '?')})"
         lines.append(f"- {topic.get('topic', '(untitled)')}{tag_text} {dates}")
@@ -267,6 +295,9 @@ def _reconcile_topics(old_topics, new_topics, today):
             # important is user-controlled: once set, the nightly merge can't clear it.
             "important": bool(prior.get("important") or topic.get("important")),
             "still_open": bool(topic.get("still_open", True)),
+            # Who owes the next step: "me", "them", or a name. Falls back to the
+            # prior value so a topic doesn't silently lose its owner on a quiet day.
+            "awaiting": (topic.get("awaiting") or prior.get("awaiting") or "").strip(),
         })
     return reconciled
 
@@ -383,10 +414,14 @@ def _format_emails(emails):
         return "(none)"
     lines = []
     for email in emails:
-        header = f"- {email.get('subject', '(no subject)')} — {email.get('sender', '')}"
+        header = f"- {email.get('subject', '(no subject)')} — from {email.get('sender', '')}"
         if email.get("received"):
             header += f" ({email['received']})"
+        if email.get("mentions_me"):
+            header += "  [@-MENTIONS ME]"
         lines.append(header)
+        if email.get("to"):
+            lines.append(f"    to: {email['to']}")
         if email.get("snippet"):
             lines.append(f"    {email['snippet']}")
     return "\n".join(lines)
@@ -400,6 +435,7 @@ def build_prompt(tasks, flagged, topics, overnight_emails, now=None):
     today_label = now.strftime("%A, %B %d, %Y")
 
     return f"""You are the personal chief of staff for a team lead. Today is {today_label}.
+The person you work for is {USER_NAME} ({USER_EMAIL}) — "me"/"you" below means them.
 
 Your job is to turn the information below into a focused daily plan. Apply solid
 management principles:
@@ -415,6 +451,17 @@ topics below are independent unless an input explicitly says otherwise. Never cl
 one task "feeds", "relates to", or "should be done together with" another, and never
 assume two items are the same project just because they sound similar. If you group
 items, only group ones the inputs actually connect; otherwise treat each on its own.
+
+Who owes the next step (important — do NOT assume it's me):
+- An email is only an ACTION ITEM for me if the evidence shows the ball is in MY
+  court: it's tagged [@-MENTIONS ME], OR I'm named in the "to:" line, OR a topic is
+  tagged "MINE TO ACT" / awaiting: me, OR the text explicitly asks me by name.
+- If a thread is simply unanswered, or someone else is waiting on a third party, or
+  I'm only cc'd / following along (a topic tagged "awaiting: <someone else>"), that
+  is NOT my action item. Treat it as a WATCHPOINT (something to keep an eye on) or
+  FYI — never put it under MORNING or AFTERNOON as if it were mine to do.
+- When in doubt about who owes the next step, prefer WATCHPOINT over action item.
+  Only my own pending tasks and things clearly addressed to me become action items.
 
 Energy model for THIS person (important):
 - They are MOST productive in the MORNING. Put the hardest, most cognitively
@@ -442,6 +489,10 @@ MORNING (high-focus work)
 
 AFTERNOON (lighter work)
 - 3 to 5 concrete action items, each one short line. Reactive/admin/meetings here.
+
+WATCHPOINTS (not my action — just keep an eye on these)
+- Threads where someone else owes the next step, or where I'm only cc'd / following
+  along. State who owes the next move. Do NOT phrase these as things for me to do.
 
 UPCOMING HIGH-PRIORITY
 - Any high-priority tasks or commitments to watch over the coming days.
@@ -566,11 +617,20 @@ def _memory_is_fresh():
 def build_memory_prompt(old_topics, emails, open_task_titles, today):
     return f"""You maintain a rolling TOPIC MEMORY for a team lead — a small set of
 running summaries of their email themes, so we never have to keep raw emails around.
+The lead is {USER_NAME} ({USER_EMAIL}) — "me"/"the lead" below means them.
 
 Today is {today}. Below are the EXISTING topics, TODAY'S emails, and the lead's
 currently OPEN tasks. Fold today's emails into the topics:
 - Merge each email into an existing topic when it fits; otherwise create a new topic.
 - Keep each summary tight (1-3 sentences) and factual; carry forward what still matters.
+- In each summary, make clear WHO owes the next step. The next step is the lead's
+  only when the evidence shows it: they're in the "to:" line, @-mentioned by name,
+  or explicitly asked by name. If someone else is waiting on a third party, or the
+  lead is only cc'd, say so plainly (e.g. "X is waiting on Y" — not on the lead).
+- Set "awaiting" to who owes the next step: "me" (the lead), "them", or a person's
+  name. Any email tagged [@-MENTIONS ME] or with the lead in the "to:" line means
+  the lead was addressed directly — that topic's "awaiting" is "me". A mail where
+  the lead is only cc'd or copied for info is NOT "me".
 - For every topic, set "last_updated" to {today} if today's emails touched it, else
   leave its previous date. Keep "first_seen" as the earliest date you can.
 - Set "still_open" to true if the topic maps to an open task or is an unresolved
@@ -587,7 +647,7 @@ currently OPEN tasks. Fold today's emails into the topics:
 {open_task_titles or "(none)"}
 
 Return ONLY a JSON array (no prose, no markdown fences) of topic objects, each:
-{{"topic": "...", "summary": "...", "first_seen": "YYYY-MM-DD", "last_updated": "YYYY-MM-DD", "still_open": true}}"""
+{{"topic": "...", "summary": "...", "first_seen": "YYYY-MM-DD", "last_updated": "YYYY-MM-DD", "still_open": true, "awaiting": "me"}}"""
 
 
 def update_memory_from_emails(force=False):
